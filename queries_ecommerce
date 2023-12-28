@@ -1,0 +1,188 @@
+# Initial dataset cleaning #
+alter table list_of_orders
+add column order_date_new date;
+UPDATE list_of_orders
+SET order_date_new = STR_TO_DATE(order_date, '%d-%m-%Y')
+WHERE order_date IS NOT NULL AND order_date != '';
+alter table list_of_orders
+drop order_date;
+
+-- QUERY 1 : The company wants to see the number of unique users per month in the year 2018 and 2019
+SELECT
+    DATE_FORMAT(order_date, '%Y') AS order_year,
+    DATE_FORMAT(order_date, '%M') AS order_month,
+    COUNT(DISTINCT customer_name) AS unique_customers
+from combined_orders
+where date_format(order_date,'%Y') in (2018,2019)
+group by 1,2
+order by 1,min(order_date);
+/* The unique customer numbers take a hit initially but by the later half of 2018, they pick up.
+  This can be due to a number of reasons. It might be due to a mix of the following:
+  1. The company began a sustained sales campaign offering discounts to lure customers
+  2. The marketing strategy in conjunction with good word of mouth helped in sustaining the 
+     increase in the number of unique customers. */
+
+-- QUERY 2: How does the order value per customer look like per month?
+select date_format(order_date,'%Y') as order_year,
+       date_format(order_date,'%M') as order_month,
+       round(sum(amount)/count(customer_name)) as order_value_per_customer,
+       COUNT(customer_name) AS customer_count
+from combined_orders
+where date_format(order_date,'%Y') in (2018,2019)
+group by 1,2
+order by 1,min(order_date);
+/* The months of July and December register the lowest and highest order values per customer. Comparing with the customer count, we can see that July had the lowest count. This may have led to an overall lower order value per customer.
+   The company needs to investigate the reasons for such and factor the insights to finetune their marketing and sales strategies.As for the month of December,it being the year end and also a festive month might have contributed 
+   to the higher order value per customer. */
+
+-- QUERY 3:The geographical distribution of customers
+select state,
+       count(distinct customer_name) as customer_count
+from combined_orders
+group by 1
+order by 2 desc;
+/* The firm is seeing maximum demand from the states of MP and Maharashtra */
+
+-- QUERY 4:The firm would like to know the order value per customer and the profits generated per state overall
+select state,
+       count(distinct customer_name) as customer_count,
+	     sum(profit) as total_profit
+from combined_orders
+group by 1
+order by 2 desc;
+/* 1. MP,UP and Maharashtra command a sizeable portion of the profit pie.The case of UP is special as more than 50% of the profit comes from a single transaction and hence cannot be held to be significant. The firm sould double down on marketing and sales campaigns to further increase the customer base in these two regions.
+   2. It can be seen that the customer base is mostly situated in 2 states. The firm needs to look into factors that are hindering it from performing in other states. Contrasts can be drawn between what worked in MP and MH and 
+	  look if the same can be replicated in the other states to draw and increase/diversify the customer base */
+
+-- QUERY 5:How are the categories performing overall?
+select category,
+       sum(profit) as total_profit,
+       round((sum(profit)/(select sum(profit) from combined_orders))*100) as percent_profit
+from combined_orders
+group by 1
+order by 2 desc;
+/* It is quite clear that clothing and electronics categories contribute 91% to the bottom-line,with clothing outperforming electronics. But is there more to this? */
+
+select category,
+       round(sum(profit)/sum(quantity)) as profit_per_unit
+from combined_orders
+group by 1
+order by 2 desc;
+/* Though clothing gives more profit to the store than electronics (also clothing was sold 3 times the quantity than electronics) on a per unit basis the electronics category is far more profitable to the firm.
+   This does have some implications on the business going forward:
+   1. The firm should focus more on the electronics category and orient marketing and sales strategies to further this category. This may include targeted marketing,expanded product offerings as well as enhancing the overall customer experience.
+   2. The clothing category is a high volume low margin business. It would be prudent to continue to drive sales albeit with more renewed focus on the electronics category. Focus should be on optimizing inventory efficiency, operations costs, increasing the average transaction value etc.
+   3. The furniture category should be assessed further in terms of business viability. It performs low in quantities sold as well as margins. A reevaluation may be necessary in terms of costs and product offerings */
+
+-- QUERY 6:The firm would like to know which sub-categories of the electronics categories should be reviewed
+select sub_category,
+	     sum(profit) as total_profits
+from combined_orders
+where category = 'Electronics'
+group by 1
+order by 2 desc;
+/* It is evident that the sub-category of electronic games is loss making and the firm will have to review the same going forward */
+
+-- QUERY 7:The marketing department would like to know whom to target for their campaign strategies and would like your input for the same.
+/* We will be doing an rfm analysis and clubbing customers into different segments based on the average rfm score */
+CREATE VIEW rfm_analysis AS 
+SELECT 
+    customer_name,
+    ntile(5) OVER (ORDER BY DATEDIFF('2019-03-31', MAX(STR_TO_DATE(order_date, '%Y-%m-%d')))) AS r,
+    ntile(5) OVER (ORDER BY COUNT(DISTINCT list_order_id) ASC) AS f,
+    ntile(5) OVER (ORDER BY SUM(amount) ASC) AS m
+FROM 
+    combined_orders
+GROUP BY 
+    customer_name;
+
+CREATE VIEW rfm_score1 AS 
+SELECT 
+    customer_name,
+    ROUND(AVG(r), 2) AS avg_r,
+    ROUND(AVG(f), 2) AS avg_f,
+    ROUND(AVG(m), 2) AS avg_m,
+    ROUND(AVG(r + f + m) / 3, 2) AS rfm_score
+FROM 
+    rfm_analysis
+GROUP BY 
+    customer_name
+ORDER BY 
+    rfm_score DESC;
+
+CREATE VIEW rfm_status AS 
+SELECT 
+    customer_name,
+    CASE 
+        WHEN rfm_score BETWEEN 4.5 AND 5 THEN 'Champions'
+        WHEN rfm_score BETWEEN 4 AND 4.5 THEN 'Loyalists'
+        WHEN rfm_score BETWEEN 3 AND 4 THEN 'Potential Loyalists'
+        WHEN rfm_score BETWEEN 2 AND 3 THEN 'At Risk'
+        WHEN rfm_score BETWEEN 1 AND 2 THEN 'Churned Out'
+    END AS customer_segment
+FROM 
+    rfm_score1;
+
+select customer_segment,
+	     count(customer_segment) as num_of_cust,
+       round(count(customer_segment)/(select count(*) from rfm_status)*100,2) as pct_of_cust
+from rfm_status
+group by 1;
+/* 1. The customer segments of champions and loyalists are your customer base that have bought recently,frequently as well as spent good amount on the store. Marketing can promote new products among these segments and can reasonably expect 
+	  to see a favourable response. Ideally, the firm should be striving to increase numbers in these segments by pushing other segments towards these.
+   2. Potential loyalists are the segment to focus on as they have moderately found use for the products from the firm and can be enticed to engage further through personalised promotions and campaigns.
+   3. At risk customers have only transacted once or twice and have not done any recent purchases. It would be prudent to study them to know how they could be better served and what value are they looking for. */
+
+-- QUERY 8 : The firm would like to find out if they had reached their sales targets for the given period
+# I created a view to consolidate all the sales grouped by the month of order date and category
+create view monthly_sales as 
+select date_format(order_date,'%b-%y') as order_date,
+	   category,
+       sum(amount) as total_sales
+from combined_orders 
+group by 1,2
+order by min(order_date) ;
+
+select * from monthly_sales;
+
+# Next, I created another view that combines the previous view and the sales_target table to include the 'target' column giving us a nice comparison between actural and targeted. Also, categorised the sales as 'Hit' or 'Miss' #
+create view sales_comparison as 
+select m.order_date,
+	     m.category,
+       m.total_sales,
+       t.target,
+       case 
+			when total_sales/target < 1 then 'Miss'
+            else 'Hit'
+            end as Sales_target_status
+from monthly_sales m
+join sales_target t on m.order_date = t.month_of_order_date and m.category = t.category
+group by 1,2,4;
+
+select * from sales_comparison;
+
+# Finally, I created a query to give us the final count of both statuses of sales grouped by the categories #
+select category,
+	     count(case when sales_target_status = 'Miss' then sales_target_status end) as miss_count,
+       count(case when sales_target_status = 'Hit' then sales_target_status end) as hit_count
+from sales_comparison
+group by 1;
+
+/* We can see clearly, that the store has been unable to meet majority of its targets in the Furniture and Clothing categories. There may be several potential reasons which may include:
+   1. The product selection in these categories are not finding value with the customers
+   2. Lack of strategic marketing ans sales campaigns incorporating customer personalized strategies */
+
+-- QUERY 9 : The firm would like to know total quantity sold, total sales achieved and total profits achieved per sub-category
+select category,
+	     sub_category,
+       sum(quantity) as total_quantity_sold,
+       sum(amount) as total_sales,
+       sum(profit) as total_profits
+from combined_orders
+group by 1,2
+order by 1;
+/*  A few observations:
+	1. Most of the sub-categories are profitable except electronic games and tables of electronics and furniture categories respectively. It may be necessary to drop these sub-categories and drive sales in other sub-categories.
+    2. Clothing category sees high number of items sold amongst all the three with Handkerchief, Saree and Stoles being the top three. In spite of this the profits from this category are not the highest and is a high volume, low margin category
+    3. The category of electronics generates high margins especially the printers sub-category(highest profits) and should be focused on to drive more sales
+    4. The category of furniture excepting tables also sees low margins. The firm should look into shoring up more sales from this category.
